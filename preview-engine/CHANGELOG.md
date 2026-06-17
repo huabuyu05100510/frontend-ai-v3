@@ -4,6 +4,32 @@
 
 ---
 
+## 2026-06-17
+
+### IndexedDB 文件持久化缓存 + DOCX/XLSX/PPTX 渲染质量提升 + 协同闪烁修复
+- **IndexedDB 文件缓存**（`cache/fileCache.ts`，零依赖原生 API）：新建 `preview-engine` DB / `files` Store；`cacheFile` 去重（name+size+lastModified）；`FilePreview` mount 时 `listCachedFiles()` 恢复文件列表（刷新免重传）；ingest 时异步 `cacheFile()` 持久化；顶部新增"已缓存 N 个文件 · 清除缓存"提示栏。
+- **DOCX 渲染质量大幅提升**（`ooxml/docx.ts`）：
+  - `Run` 新增 `fontSize`（`w:sz÷2` pt）、`color`（`w:color val` 转 `#RRGGBB`）、`underline`（`w:u` val≠none）、`strikethrough`（`w:strike/w:dstrike`）。
+  - 新增 `list` Block 类型（`ordered/level`）：解析 `w:numPr`（numId+ilvl）+ `word/numbering.xml`（`w:abstractNum w:numFmt` 判断有序/无序，`w:num` 建 numId→ordered Map）。
+  - 新增 `paragraph` 的 `spacingBefore/spacingAfter`（`w:spacing` twips→px）与 `indentLeft`（`w:ind w:left` twips→px）。
+  - `loadDocx` 自动加载 `word/numbering.xml` 并透传 `numMap` 给 `parseDocx`。
+  - `OfficeView.DocxBlockView`：run span 渲染 fontSize/color/textDecoration；list 渲染为 `<ol>/<ul>` 带层级缩进；paragraph 使用 marginTop/Bottom/paddingLeft。
+- **XLSX 真实列宽/行高**（`ooxml/xlsx.ts`）：`SheetModel` 新增 `colWidths?/rowHeights?`；`parseSheet` 解析 `<col width>`（字符宽×7px）与 `<row ht>`（pt×4/3px）；`VirtualSheet` 用真实尺寸构建 `CumulativeIndex`，列头/单元格宽高随之动态匹配。
+- **PPTX 实际幻灯片比例**（`ooxml/pptx.ts`）：`loadPptx` 解析 `ppt/presentation.xml` 的 `<p:sldSz cx cy>`（EMU）；`Slide` 新增 `slideWidth?/slideHeight?`；`SlideFrame` 按 96dpi 换算实际像素比例渲染，不再硬编码 16:9。
+- **协同闪烁根治**（`PdfEditor.tsx`）：删除每次渲染重建的 `collab = { current: getCollab() }` 中间变量；全文改用稳定的 `collabRef.current!`；`refresh` useCallback 依赖改为 `[]`；协同 useEffect 依赖从 `[source, refresh, collab]` 变为 `[source, refresh]`—— WebSocket 不再因组件重渲染反复断连。新增 `PageList` 组件 + `useMemo` 按页分组 annotations（稳定引用）；`PageView` 包裹 `React.memo`，无关页面注解更新不触发 canvas 重绘。
+- **验证**：tsc 0 错；196/207 测试通过（11 个预存 jsdom 环境失败不变）；构建成功。
+
+### 图片 OCR 文本层 + DOCX/PPTX 虚拟化 + 真实样例验证
+- **图片 OCR 文本层**：`renderers/ocr/layout.ts`（词框→渲染坐标缩放，纯函数已 TDD）+ `tesseract.ts`（按需从 CDN 动态加载 Tesseract.js，不进主包）。`ImageView` 新增「识别文字(OCR)」：识别后在图上叠加透明可选/可复制文本层，支持「显示译文」（mockTranslate，半透明底）与「复制全部」。
+- **DOCX/PPTX 虚拟化**：新增可复用 `VirtualList`（估算高度渲染→挂载量测真实高度回填 `CumulativeIndex`→重算窗口，仅渲染视口+overscan）。`DocxBody` 改为按块虚拟化（双栏对比按行对齐，单滚动）；`PptxBody` 幻灯片列表虚拟化。
+- **真实样例 + 端到端验证**：`scripts/gen-samples.mjs` 生成真实 `sample.docx`（标题/对齐/表格/真实 PNG 图片）、`sample.xlsx`、`sample.pptx`、`sample.xls`（真实 CFB+BIFF8，中文宽字符 SST）到 `samples/`；新增 `samples.test.ts` 用真实文件跑通真实 loader。`.xls` 经 BIFF 解析得到「名称/数量/苹果/3」。
+- **验证**：tsc 0 错；**前端 207 测试通过**（新增 8）+ 服务端 17；构建成功（gzip 70.6KB）。拖 `samples/` 里的文件即可实测。
+
+### XLSX 视口虚拟化（去掉截断，支撑超大表）
+- **问题**：原 `SheetTable` 截断 500 行 × 60 列，违背“极致性能”。
+- **实现**：新增 `VirtualSheet`，行列双轴各用一个 `CumulativeIndex` 计算可见区间（O(log n)），仅渲染视口内 + overscan 的单元格；绝对定位 + 行号/列头（`indexToCol` 0→A/26→AA，已 TDD 与 `colToIndex` 互逆）；`rAF` 节流滚动。`SheetBody`（含双栏对比与 `LegacyOfficeView` 的 BIFF 回退）全部改用虚拟化。
+- **验证**：xlsx 测试 8 通过；tsc 0 错；构建成功。
+
 ## 2026-06-16
 
 ### 修复 DOCX 图片/对齐 + 本地服务端真转换（旧版二进制 doc/xls/ppt）

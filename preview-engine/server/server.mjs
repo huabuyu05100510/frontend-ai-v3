@@ -13,6 +13,17 @@ import { convertLegacy } from './convert.mjs'
 
 const PORT = Number(process.env.PORT) || 8787
 
+/** Room ID 合法字符：字母/数字/连字符/下划线，长度 1-64 */
+const ROOM_ID_RE = /^[a-zA-Z0-9_:.-]{1,64}$/
+/** 最多同时存在的 room 数量，防止资源耗尽 */
+const MAX_ROOMS = 1000
+/** 单条 WebSocket 消息最大字节数（1 MB），防止 OOM 攻击 */
+const MAX_MSG_BYTES = 1 * 1024 * 1024
+
+function isValidRoomId(id) {
+  return typeof id === 'string' && ROOM_ID_RE.test(id)
+}
+
 /** roomId -> { room, clients:Set<socket> } */
 const rooms = new Map()
 function getRoom(id) {
@@ -76,6 +87,7 @@ server.on('upgrade', (req, socket) => {
   )
 
   let buffer = Buffer.alloc(0)
+  let bufferSize = 0
   let joined = null
   const send = (obj) => {
     if (!socket.writable) return
@@ -90,9 +102,16 @@ server.on('upgrade', (req, socket) => {
   }
 
   socket.on('data', (chunk) => {
+    bufferSize += chunk.length
+    if (bufferSize > MAX_MSG_BYTES) {
+      // 单条消息超限，关闭连接防止 OOM
+      socket.destroy()
+      return
+    }
     buffer = Buffer.concat([buffer, chunk])
     const { messages, rest } = decodeFrames(buffer)
     buffer = rest
+    bufferSize = rest.length
     for (const m of messages) {
       if (m.opcode === 0x8) {
         socket.end()
@@ -106,7 +125,20 @@ server.on('upgrade', (req, socket) => {
         continue
       }
       if (msg.t === 'join') {
-        joined = getRoom(String(msg.room || 'default'))
+        const roomId = String(msg.room || 'default')
+        // 校验 room ID 格式
+        if (!isValidRoomId(roomId)) {
+          send({ t: 'error', reason: 'invalid room id' })
+          socket.destroy()
+          return
+        }
+        // 防止 room 数量无限增长
+        if (!rooms.has(roomId) && rooms.size >= MAX_ROOMS) {
+          send({ t: 'error', reason: 'server at capacity' })
+          socket.destroy()
+          return
+        }
+        joined = getRoom(roomId)
         joined.clients.add(socket)
         send({ t: 'snapshot', snapshot: snapshot(joined.room) })
       } else if (msg.t === 'op' && joined && msg.update) {
@@ -119,7 +151,14 @@ server.on('upgrade', (req, socket) => {
   })
 
   const cleanup = () => {
-    if (joined) joined.clients.delete(socket)
+    if (!joined) return
+    joined.clients.delete(socket)
+    // room 最后一个客户端离开后自动回收，防止空 room 无限积累
+    if (joined.clients.size === 0) {
+      for (const [id, r] of rooms) {
+        if (r === joined) { rooms.delete(id); break }
+      }
+    }
   }
   socket.on('close', cleanup)
   socket.on('error', cleanup)
